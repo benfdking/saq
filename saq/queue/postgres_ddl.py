@@ -24,8 +24,19 @@ CREATE TABLE IF NOT EXISTS {stats_table} (
 );
 """
 
+CREATE_WORKER_METADATA_TABLE = """
+CREATE TABLE IF NOT EXISTS {worker_metadata_table} (
+    worker_id TEXT PRIMARY KEY,
+    queue_key TEXT NOT NULL,
+    expire_at BIGINT NOT NULL,
+    ip_address TEXT,
+    metadata JSONB 
+);
+"""
+
 DDL_STATEMENTS = [
     CREATE_JOBS_TABLE,
     CREATE_JOBS_DEQUEUE_INDEX,
     CREATE_STATS_TABLE,
+    CREATE_WORKER_METADATA_TABLE,
 ]

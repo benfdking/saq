@@ -107,6 +107,15 @@ class HttpProxy:
                     worker_id=req["worker_id"], stats=req["stats"], ttl=req["ttl"]
                 )
                 return None
+            if kind == "write_worker_metadata":
+                await self.queue.write_worker_metadata(
+                    metadata=req["metadata"],
+                    ttl=req["ttl"],
+                    ip_address=req["ip_address"],
+                    queue_key=req["queue_key"],
+                    worker_id=req["worker_id"],
+                )
+                return None
         raise ValueError(f"Invalid request {body}")
 
 
@@ -210,6 +219,18 @@ class HttpQueue(Queue):
 
     async def write_stats(self, worker_id: str, stats: WorkerStats, ttl: int) -> None:
         await self._send("write_stats", worker_id=worker_id, stats=stats, ttl=ttl)
+
+    async def write_worker_metadata(
+        self, worker_id: str, queue_key: str, ip_address: str, metadata: t.Optional[dict], ttl: int
+    ) -> None:
+        await self._send(
+            "write_worker_metadata",
+            worker_id=worker_id,
+            metadata=metadata,
+            ttl=ttl,
+            ip_address=ip_address,
+            queue_key=queue_key,
+        )
 
     async def info(self, jobs: bool = False, offset: int = 0, limit: int = 10) -> QueueInfo:
         return json.loads(await self._send("info", jobs=jobs, offset=offset, limit=limit))

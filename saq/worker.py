@@ -9,6 +9,7 @@ import contextvars
 import logging
 import os
 import signal
+import socket
 import sys
 import traceback
 import threading
@@ -42,6 +43,9 @@ if t.TYPE_CHECKING:
 
 logger = logging.getLogger("saq")
 
+# Type that represents arbitrary json
+JsonDict = t.Dict[str, t.Any]
+
 
 class Worker:
     """
@@ -65,6 +69,7 @@ class Worker:
         dequeue_timeout: how long it will wait to dequeue
         burst: whether to stop the worker once all jobs have been processed
         max_burst_jobs: the maximum number of jobs to process in burst mode
+        metadata: arbitrary data to pass to the worker which it will register with saq
     """
 
     SIGNALS = [signal.SIGINT, signal.SIGTERM] if os.name != "nt" else [signal.SIGTERM]
@@ -85,6 +90,7 @@ class Worker:
         dequeue_timeout: float = 0,
         burst: bool = False,
         max_burst_jobs: int | None = None,
+        metadata: t.Optional[JsonDict] = None,
     ) -> None:
         self.queue = queue
         self.concurrency = concurrency
@@ -102,6 +108,7 @@ class Worker:
             "stats": 10,
             "sweep": 60,
             "abort": 1,
+            "metadata": 60,
         }
         if timers is not None:
             self.timers.update(timers)
@@ -118,6 +125,8 @@ class Worker:
         self.burst_jobs_processed = 0
         self.burst_jobs_processed_lock = threading.Lock()
         self.burst_condition_met = False
+        self._metadata = metadata
+        self._ip_address = get_ip_address()
         self.id = uuid1() if id is None else id
 
         if self.burst:
@@ -217,6 +226,15 @@ class Worker:
         if scheduled:
             logger.info("Scheduled %s", scheduled)
 
+    async def metadata(self, ttl: int = 60) -> None:
+        await self.queue.write_worker_metadata(
+            queue_key=self.queue.name,
+            ip_address=self._ip_address,
+            metadata=self._metadata,
+            ttl=ttl,
+            worker_id=self.id,
+        )
+
     async def stats(self, ttl: int = 60) -> WorkerStats:
         return await self.queue.stats(self.id, ttl)
 
@@ -241,6 +259,7 @@ class Worker:
             asyncio.create_task(poll(self.schedule, self.timers["schedule"])),
             asyncio.create_task(poll(self.queue.sweep, self.timers["sweep"])),
             asyncio.create_task(poll(self.stats, self.timers["stats"], self.timers["stats"] + 1)),
+            asyncio.create_task(poll(self.metadata, self.timers["metadata"])),
         ]
 
     async def abort(self, abort_threshold: float) -> None:
@@ -464,3 +483,10 @@ def check_health(settings: str) -> int:
     loop = asyncio.new_event_loop()
     queue = settings_dict.get("queue") or Queue.from_url("redis://localhost")
     return loop.run_until_complete(async_check_health(queue))
+
+
+def get_ip_address() -> str:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect(("8.8.8.8", 80))
+        ip_address = s.getsockname()[0]
+    return ip_address
