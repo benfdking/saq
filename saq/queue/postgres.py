@@ -13,6 +13,8 @@ from contextlib import asynccontextmanager
 from functools import cached_property
 from textwrap import dedent
 
+from psycopg.errors import UndefinedTable
+
 from saq.errors import MissingDependencyError
 from saq.job import (
     Job,
@@ -20,7 +22,8 @@ from saq.job import (
 )
 from saq.multiplexer import Multiplexer
 from saq.queue.base import Queue, logger
-from saq.queue.postgres_ddl import DDL_STATEMENTS
+
+from saq.queue.postgres_migrations import return_migrations
 from saq.utils import now, now_seconds
 
 if t.TYPE_CHECKING:
@@ -49,6 +52,7 @@ ENQUEUE = "saq:enqueue"
 DEQUEUE = "saq:dequeue"
 JOBS_TABLE = "saq_jobs"
 STATS_TABLE = "saq_stats"
+MIGRATIONS_TABLE = "saq_migrations"
 
 
 class PostgresQueue(Queue):
@@ -90,6 +94,7 @@ class PostgresQueue(Queue):
         name: str = "default",
         jobs_table: str = JOBS_TABLE,
         stats_table: str = STATS_TABLE,
+        migrations_table: str = MIGRATIONS_TABLE,
         dump: DumpType | None = None,
         load: LoadType | None = None,
         min_size: int = 4,
@@ -101,6 +106,7 @@ class PostgresQueue(Queue):
     ) -> None:
         super().__init__(name=name, dump=dump, load=load)
 
+        self.migrations_table = Identifier(migrations_table)
         self.jobs_table = Identifier(jobs_table)
         self.stats_table = Identifier(stats_table)
         self.pool = pool
@@ -132,10 +138,50 @@ class PostgresQueue(Queue):
             if result and not result[0]:
                 return
 
-            for statement in DDL_STATEMENTS:
+            migrations = return_migrations(
+                migrations_table=self.migrations_table,
+                jobs_table=self.jobs_table,
+                stats_table=self.stats_table,
+            )
+            target_number = len(migrations)
+            try:
                 await cursor.execute(
-                    SQL(statement).format(jobs_table=self.jobs_table, stats_table=self.stats_table)
+                    SQL(
+                        dedent(
+                            """
+                        SELECT id FROM {migrations_table}
+                        """
+                        )
+                    ).format(migrations_table=self.migrations_table),
                 )
+                result = await cursor.fetchone()
+            except UndefinedTable:
+                result = None
+            if result is not None:
+                current_migration = result[0]
+                if current_migration == target_number:
+                    return
+                if current_migration > target_number:
+                    raise ValueError("Database schema is newer than the code")
+
+        async with self.pool.connection() as conn, conn.cursor() as cursor, conn.transaction():
+            current = result[0] if result else 0
+            for migration in migrations[current:]:
+                for migration_statement in migration:
+                    await cursor.execute(
+                        migration_statement,
+                    )
+
+            await cursor.execute(
+                SQL(
+                    dedent(
+                        """
+                            DELETE FROM {migrations_table};
+                            INSERT INTO {migrations_table} (id) VALUES ({target_number});
+                            """
+                    )
+                ).format(migrations_table=self.migrations_table, target_number=target_number),
+            )
 
     async def connect(self) -> None:
         if self.pool._opened:
